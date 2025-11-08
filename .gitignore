@@ -1,0 +1,83 @@
+# --- Python bytecode / cache ---
+__pycache__/
+*.py[cod]
+*$py.class
+
+simian-result.xml
+upload_repo_*/
+# --- Virtual environments ---
+.venv/
+venv/
+env/
+ENV/
+.pipenv/
+pip-wheel-metadata/
+
+# --- PEP 582 / local packages ---
+__pypackages__/
+
+# --- Distribution / packaging ---
+build/
+dist/
+wheels/
+*.egg-info/
+*.egg
+.eggs/
+
+# --- Logs / runtime ---
+*.log
+*.pid
+
+# --- Unit test / coverage ---
+.pytest_cache/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+htmlcov/
+.tox/
+.nox/
+
+# --- Type checkers / linters ---
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.pytype/
+
+# --- Jupyter / IPython ---
+.ipynb_checkpoints/
+.profile_default/
+ipython_config.py
+
+# --- Django / Flask ---
+instance/
+*.sqlite3
+
+# --- Environment & secrets ---
+.env
+.env.*
+*.env
+
+# --- Editors / IDEs ---
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# --- OS files ---
+.DS_Store
+Thumbs.db
+
+# --- Tools (add as needed) ---
+# nicadclones/          # <- descomente se gerar saídas do NiCad
+# txl-temp/             # <- diretórios temporários do TXL
+# tmp/                  
+
+# --- Pyenv ---
+.python-version
+
+# --- Others you might want ---
+# local_data/
+# notes/
