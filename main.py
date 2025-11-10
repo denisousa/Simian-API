@@ -1,103 +1,110 @@
-import io
 import os
 import re
-import tarfile
-import tempfile
 import shutil
 import subprocess
 from pathlib import Path
-from simian import run_simian
-from utils import find_repo_root, safe_extract_tar_gz
+from urllib.parse import urlparse
+
 from flask import Flask, jsonify, request, Response
+from flask_cors import CORS
+from simian import run_simian
+from utils import find_repo_root
 
 app = Flask(__name__)
+CORS(app)
 
-# Limit upload size (adjust as needed)
-app.config["MAX_CONTENT_LENGTH"] = 800 * 1024 * 1024  # 200 MB
-
-# Allow abbreviated commit hashes (>=7 hex chars) up to full 40-chars SHA-1
+# Accept abbreviated SHA-1 (>=7) up to 40 chars
 COMMIT_HASH_RE = re.compile(r"^[0-9a-fA-F]{7,40}$")
+# http(s) or SCP-like (git@host:org/repo.git)
+GIT_URL_RE = re.compile(r"^(https?|git)://|^[\w.@:/~-]+@[\w.-]+:.+\.git$")
 
-@app.post("/upload-checkout")
-def upload_and_checkout():
-    if "file" not in request.files:
-        return jsonify(error="missing form field 'file' (.tar.gz required)"), 400
+REPOS_DIR = Path.cwd() / "repos"
+REPOS_DIR.mkdir(exist_ok=True)
 
-    commit = (request.form.get("commit") or "").strip()
-    if not commit or not COMMIT_HASH_RE.match(commit):
-        return jsonify(error="missing/invalid 'commit' (>=7 hex chars required)"), 400
-    commit = commit[:7]
 
-    uploaded = request.files["file"]
-    if not uploaded.filename.lower().endswith(".tar.gz"):
-        return jsonify(error="uploaded file must have .tar.gz extension"), 400
+def _dir_name_from_url(repo_url: str) -> str:
+    path = urlparse(repo_url).path
+    if not path:  # scp-like: git@github.com:org/proj.git
+        path = repo_url.split(":", 1)[-1]
+    tail = Path(path).name
+    return tail[:-4] if tail.endswith(".git") else tail
 
-    tmp_dir = Path(tempfile.mkdtemp(prefix="upload_repo_", dir=str(Path.cwd())))
-    tar_path = tmp_dir / "upload.tar.gz"
-    uploaded.save(tar_path)
 
-    repo_dir = None
+def _run(cmd, cwd=None, timeout=120):
+    return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout)
+
+
+def _ensure_repo(repo_url: str) -> Path:
+    repo_dir = REPOS_DIR / _dir_name_from_url(repo_url)
+
+    if repo_dir.exists() and (repo_dir / ".git").exists():
+        fetch = _run(["git", "fetch", "--all", "--tags", "--prune"], cwd=repo_dir)
+        if fetch.returncode != 0:
+            raise RuntimeError(f"git fetch failed: {fetch.stderr.strip()}")
+        return repo_dir
+
+    clone = _run(["git", "clone", repo_url, str(repo_dir)])
+    if clone.returncode != 0:
+        shutil.rmtree(repo_dir, ignore_errors=True)
+        raise RuntimeError(f"git clone failed: {clone.stderr.strip()}")
+
+    fetch = _run(["git", "fetch", "--all", "--tags", "--prune"], cwd=repo_dir)
+    if fetch.returncode != 0:
+        raise RuntimeError(f"git fetch failed: {fetch.stderr.strip()}")
+
+    return repo_dir
+
+
+@app.route("/clone-detection/trigger", methods=["GET"])
+def trigger_clone_detection():
+    repo_url = (request.args.get("repo") or "").strip()
+    ref = (request.args.get("sha") or "").strip()
+
+    if not repo_url or not GIT_URL_RE.search(repo_url):
+        return jsonify(error="missing/invalid 'repo'"), 400
+    if not ref:
+        return jsonify(error="missing 'sha' (commit-ish required)"), 400
 
     try:
-        with open(tar_path, "rb") as f:
-            safe_extract_tar_gz(io.BytesIO(f.read()), tmp_dir)
+        repo_dir = _ensure_repo(repo_url)
+    except RuntimeError as e:
+        return jsonify(error=str(e)), 400
 
-        repo_dir = find_repo_root(tmp_dir)
-        if not repo_dir:
-            return jsonify(error="no Git repository (.git) found in the extracted content"), 400
+    root = find_repo_root(repo_dir) or repo_dir
+    if not (root / ".git").exists():
+        return jsonify(error="invalid repository (.git not found)"), 400
 
-        proc = subprocess.run(
-            ["git", "-C", str(repo_dir), "checkout", "--quiet", commit],
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
+    rp = _run(["git", "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"], cwd=root)
+    if rp.returncode != 0:
+        return jsonify(error="commit-ish not found in repository", ref=ref), 404
+    full_sha = (rp.stdout or "").strip()
+    if not full_sha:
+        return jsonify(error="could not resolve commit-ish", ref=ref), 404
 
-        if proc.returncode != 0:
-            return jsonify(
-                error="git checkout failed",
-                stdout=proc.stdout,
-                stderr=proc.stderr,
-            ), 400
-        
-        simian_result = run_simian(str(repo_dir))
+    co = _run(["git", "checkout", "--quiet", full_sha], cwd=root, timeout=60)
+    if co.returncode != 0:
+        return jsonify(error="git checkout failed", stdout=co.stdout, stderr=co.stderr), 400
 
-        return Response(
-            simian_result,
-            status=200,
-            mimetype="application/xml",
-            headers={"Content-Type": "application/xml; charset=utf-8"},
-        )
+    simian_result = run_simian(str(root))
+    return Response(
+        simian_result,
+        status=200,
+        mimetype="application/xml",
+        headers={"Content-Type": "application/xml; charset=utf-8"},
+    )
 
-    except tarfile.ReadError:
-        return jsonify(error="invalid or corrupted .tar.gz"), 400
-    except ValueError as ve:
-        return jsonify(error=str(ve)), 400
-    except subprocess.TimeoutExpired:
-        return jsonify(error="timeout while running git"), 504
-    except Exception as e:
-        return jsonify(error=f"unexpected error: {e.__class__.__name__}"), 500
-    finally:
-        try:
-            if tar_path.exists():
-                tar_path.unlink()
-        except Exception:
-            pass
-        try:
-            if tmp_dir.exists():
-                shutil.rmtree(tmp_dir, ignore_errors=True)
-        except Exception:
-            pass
+
 
 
 @app.get("/")
 def health():
     return jsonify(status="ok", service="Simian-api")
 
+
 def run_dev():
-    port = int(os.getenv("PORT", "5000"))
+    port = int(os.getenv("PORT", "5001"))
     app.run(host="0.0.0.0", port=port, debug=True)
 
-# permite: `poetry run python -m myapi.app`
+
 if __name__ == "__main__":
     run_dev()
